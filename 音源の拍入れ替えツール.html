@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>拍入れ替えツール</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: sans-serif; margin: 20px; }
+label, select, input, button { margin: 5px; }
+</style>
+</head>
+<body>
+<h1>拍入れ替えツール</h1>
+<input type="file" id="fileInput" accept="audio/*,.mp3,.wav">
+<br>
+<label>1小節の長さ（秒） <input type="number" id="measureLength" value="2" step="0.01"></label>
+<br>
+<label>拍1 <select id="beatA"></select></label>
+<label>拍2 <select id="beatB"></select></label>
+<br>
+<button id="processBtn">入れ替え＆再生</button>
+<a id="downloadLink" style="display:none;">ダウンロード</a>
+<audio id="player" controls style="display:block;margin-top:12px;width:100%"></audio>
+<script>
+for (let i = 1; i <= 4; i++) {
+  beatA.innerHTML += `<option value="${i}">${i}拍目</option>`;
+  beatB.innerHTML += `<option value="${i}">${i}拍目</option>`;
+}
+
+let ctx = null;
+let audioBuffer = null;
+
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const arrayBuffer = await file.arrayBuffer();
+  try {
+    audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    alert('読み込み完了');
+  } catch (err) {
+    alert('読み込み失敗: ' + err.message);
+  }
+});
+
+function sliceBuffer(src, startSec, endSec) {
+  const sr = src.sampleRate;
+  const start = Math.floor(startSec * sr);
+  const end = Math.floor(endSec * sr);
+  const len = end - start;
+  const newBuf = ctx.createBuffer(src.numberOfChannels, len, sr);
+  for (let ch = 0; ch < src.numberOfChannels; ch++) {
+    const srcData = src.getChannelData(ch).subarray(start, end);
+    newBuf.copyToChannel(srcData, ch);
+  }
+  return newBuf;
+}
+
+function concatBuffers(buffers) {
+  if (!buffers.length) return ctx.createBuffer(1, 0, ctx.sampleRate);
+  const chs = buffers[0].numberOfChannels;
+  const sr = buffers[0].sampleRate;
+  const totalLen = buffers.reduce((sum, b) => sum + b.length, 0);
+  const out = ctx.createBuffer(chs, totalLen, sr);
+  let offset = 0;
+  for (const buf of buffers) {
+    for (let ch = 0; ch < chs; ch++) {
+      out.getChannelData(ch).set(buf.getChannelData(ch), offset);
+    }
+    offset += buf.length;
+  }
+  return out;
+}
+
+function bufferToWav(buffer) {
+  const numCh = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const length = buffer.length;
+  const bytes = length * numCh * 2 + 44;
+  const ab = new ArrayBuffer(bytes);
+  const dv = new DataView(ab);
+  let p = 0;
+  function u16(v) { dv.setUint16(p, v, true); p += 2; }
+  function u32(v) { dv.setUint32(p, v, true); p += 4; }
+  u32(0x46464952); u32(bytes - 8); u32(0x45564157);
+  u32(0x20746d66); u32(16); u16(1); u16(numCh);
+  u32(sampleRate); u32(sampleRate * numCh * 2);
+  u16(numCh * 2); u16(16);
+  u32(0x61746164); u32(bytes - p - 4);
+  const chData = [];
+  for (let i = 0; i < numCh; i++) chData.push(buffer.getChannelData(i));
+  for (let i = 0; i < length; i++) {
+    for (let ch = 0; ch < numCh; ch++) {
+      let s = chData[ch][i];
+      s = Math.max(-1, Math.min(1, s));
+      s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      dv.setInt16(p, s, true);
+      p += 2;
+    }
+  }
+  return ab;
+}
+
+processBtn.addEventListener('click', () => {
+  if (!audioBuffer) { alert('先に音源を読み込んでください'); return; }
+  const measure = parseFloat(measureLength.value);
+  if (!(measure > 0)) { alert('小節長を正しく入力してください'); return; }
+  const a = parseInt(beatA.value);
+  const b = parseInt(beatB.value);
+  const beatLen = measure / 4;
+  const measures = Math.floor(audioBuffer.duration / measure);
+  const parts = [];
+  for (let m = 0; m < measures; m++) {
+    const beats = [];
+    for (let k = 0; k < 4; k++) {
+      const st = m * measure + k * beatLen;
+      const en = st + beatLen;
+      beats.push(sliceBuffer(audioBuffer, st, en));
+    }
+    const tmp = beats[a - 1];
+    beats[a - 1] = beats[b - 1];
+    beats[b - 1] = tmp;
+    parts.push(...beats);
+  }
+  const tailStart = measures * measure;
+  if (tailStart < audioBuffer.duration) {
+    parts.push(sliceBuffer(audioBuffer, tailStart, audioBuffer.duration));
+  }
+  const out = concatBuffers(parts);
+  const wav = bufferToWav(out);
+  const blob = new Blob([wav], { type: 'audio/wav' });
+  const url = URL.createObjectURL(blob);
+  player.src = url;
+  player.play();
+  downloadLink.href = url;
+  downloadLink.download = 'swapped.wav';
+  downloadLink.style.display = 'inline';
+});
+</script>
+</body>
+</html>
